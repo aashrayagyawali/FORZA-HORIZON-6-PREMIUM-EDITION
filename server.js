@@ -31,8 +31,8 @@ const DOWNLOAD_TTL_MS = 10 * 60 * 1000; // 10 minutes
 app.use(cors({
   origin: function(origin, callback) {
     const allowed = [
-      'https://xpxforza.netlify.app',
-      'https://xpx-forza-special.netlify.app',
+      'https://xpxfh6.netlify.app',
+      
       'http://localhost',
       'http://127.0.0.1',
     ];
