@@ -52,7 +52,9 @@ app.use(express.json());
    HELPERS
    ============================================================ */
 function readKeys() {
-  return JSON.parse(fs.readFileSync(KEYS_FILE, 'utf8'));
+  const data = JSON.parse(fs.readFileSync(KEYS_FILE, 'utf8'));
+  if (!data.orders) data.orders = [];
+  return data;
 }
 function writeKeys(data) {
   fs.writeFileSync(KEYS_FILE, JSON.stringify(data, null, 2));
@@ -171,11 +173,87 @@ app.post('/api/submit-order', upload.single('screenshot'), async (req, res) => {
       }],
     });
 
+    // Save order to keys.json
+    const data = readKeys();
+    if (!data.orders) data.orders = [];
+    data.orders.push({ orderId, name, email, whatsapp, ip, status: 'pending', submittedAt: new Date().toISOString() });
+    writeKeys(data);
+
     console.log(`[${new Date().toISOString()}] ORDER: ${orderId} from ${email}`);
     return res.json({ success: true, message: 'Order received! Your redeem key will be emailed within 1-6 hours.' });
   } catch(err) {
     console.error('submit-order error:', err);
     return res.json({ success: false, message: 'Server error. Please try again or contact support.' });
+  }
+});
+
+
+/* ============================================================
+   VERIFY ORDER — admin clicks verify, sends key to customer
+   ============================================================ */
+app.post('/api/verify-order', async (req, res) => {
+  const pw      = req.query.password || req.body.password;
+  const orderId = req.body.orderId;
+  if (pw !== ADMIN_PASSWORD) return res.status(401).json({ error: 'Unauthorized' });
+  if (!orderId) return res.status(400).json({ error: 'Missing orderId' });
+
+  const data = readKeys();
+  const orderIdx = (data.orders || []).findIndex(o => o.orderId === orderId);
+  if (orderIdx === -1) return res.status(404).json({ error: 'Order not found' });
+
+  const order = data.orders[orderIdx];
+  if (order.status === 'verified') return res.json({ success: false, message: 'Order already verified.' });
+
+  // Pick first unused unreserved key
+  const keyIdx = data.keys.findIndex(k => !k.used && !k.reserved);
+  if (keyIdx === -1) return res.json({ success: false, message: 'No keys available!' });
+
+  const assignedKey = data.keys[keyIdx].key;
+
+  // Reserve key
+  data.keys[keyIdx].reserved = true;
+  data.keys[keyIdx].orderId  = orderId;
+
+  // Update order
+  data.orders[orderIdx].status     = 'verified';
+  data.orders[orderIdx].verifiedAt = new Date().toISOString();
+  data.orders[orderIdx].assignedKey = assignedKey;
+  writeKeys(data);
+
+  // Email customer
+  try {
+    await sendEmail({
+      to: order.email,
+      subject: 'Your Forza Horizon 6 Premium Edition — Redeem Key',
+      html: `
+        <div style="font-family:monospace;background:#06060a;color:#eeeaf0;padding:32px;border-radius:12px;max-width:560px;">
+          <h2 style="color:#e8c97a;letter-spacing:3px;margin-bottom:8px;">XPX GAMING</h2>
+          <p style="color:#9591a0;font-size:13px;margin-bottom:24px;">Forza Horizon 6 Premium Edition</p>
+          <p style="margin-bottom:16px;">Hi <strong>${order.name}</strong>, your payment has been verified. Here is your Redeem Key:</p>
+          <div style="background:#0e0d14;border:1px solid #e8c97a;border-radius:8px;padding:20px;text-align:center;margin:24px 0;">
+            <div style="font-size:11px;color:#9591a0;letter-spacing:3px;margin-bottom:8px;">YOUR REDEEM KEY</div>
+            <div style="font-size:22px;font-weight:700;color:#e8c97a;letter-spacing:4px;">${assignedKey}</div>
+          </div>
+          <div style="background:#0a0e0b;border:1px solid #1a2e20;border-radius:8px;padding:16px;margin-bottom:24px;">
+            <div style="color:#39d98a;font-size:11px;letter-spacing:2px;margin-bottom:10px;">HOW TO USE YOUR KEY</div>
+            <ol style="color:#9591a0;font-size:13px;line-height:1.8;padding-left:16px;">
+              <li>Go to <a href="https://xpxfh6.netlify.app/payment.html" style="color:#e8c97a;">xpxfh6.netlify.app/payment.html</a></li>
+              <li>Enter your Redeem Key in the key field</li>
+              <li>Click <strong style="color:#eeeaf0;">Redeem & Download</strong></li>
+              <li>Your Forza Horizon 6 package will download automatically</li>
+            </ol>
+          </div>
+          <div style="border-top:1px solid #1a1825;padding-top:16px;text-align:center;">
+            <p style="color:#4a4660;font-size:11px;letter-spacing:2px;">© 2026 XPX GAMING — AASHRYAAA PVT. LTD.</p>
+          </div>
+        </div>
+      `,
+    });
+    console.log(`[${new Date().toISOString()}] VERIFIED: ${orderId} → key ${assignedKey} sent to ${order.email}`);
+    return res.json({ success: true, message: 'Key sent to customer!' });
+  } catch(err) {
+    console.error('verify-order email error:', err);
+    return res.json({ success: false, message: 'Key assigned but email failed: ' + err.message });
   }
 });
 
@@ -300,17 +378,47 @@ app.get('/admin', (req, res) => {
     <div class="stat"><div class="n" style="color:#39d98a">${avail}</div><div class="l">AVAILABLE</div></div>
     <div class="stat"><div class="n" style="color:#e05c4b">${used}</div><div class="l">USED</div></div>
   </div>
+  <h2 style="color:#e8c97a;letter-spacing:3px;margin:32px 0 16px;">ORDERS</h2>
+  ${(data.orders||[]).length === 0 ? '<p style="color:#4a4660;">No orders yet.</p>' : `
+  <table>
+    <tr><th>ORDER ID</th><th>NAME</th><th>EMAIL</th><th>WHATSAPP</th><th>STATUS</th><th>SUBMITTED</th><th>ACTION</th></tr>
+    ${(data.orders||[]).map(o => `
+    <tr>
+      <td style="color:#4af0ff;font-size:11px;">${o.orderId}</td>
+      <td>${o.name}</td>
+      <td>${o.email}</td>
+      <td style="color:#9591a0">${o.whatsapp||'—'}</td>
+      <td class="${o.status==='verified'?'avail':''}' style="color:${o.status==='pending'?'#e8c97a':'#39d98a'}">${o.status==='verified'?'✓ VERIFIED':'⏳ PENDING'}</td>
+      <td style="color:#9591a0;font-size:11px">${new Date(o.submittedAt).toLocaleString()}</td>
+      <td>${o.status==='pending' ? `<button onclick="verifyOrder('${o.orderId}')" style="background:#39d98a;color:#06060a;border:none;padding:6px 14px;border-radius:4px;cursor:pointer;font-weight:700;font-family:monospace;letter-spacing:1px;">VERIFY</button>` : `<span style="color:#39d98a">Key: ${o.assignedKey||'—'}</span>`}</td>
+    </tr>`).join('')}
+  </table>`}
+
+  <h2 style="color:#e8c97a;letter-spacing:3px;margin:32px 0 16px;">REDEEM KEYS</h2>
   <table>
     <tr><th>#</th><th>KEY</th><th>STATUS</th><th>USED AT</th><th>IP</th></tr>
     ${data.keys.map((k, i) => `
     <tr>
       <td style="color:#4a4660">${i + 1}</td>
       <td style="color:#4af0ff">${k.key}</td>
-      <td class="${k.used ? 'used' : 'avail'}">${k.used ? '✗ USED' : '✓ AVAILABLE'}</td>
+      <td class="${k.used ? 'used' : 'avail'}">${k.used ? '✗ USED' : k.reserved ? '🔒 RESERVED' : '✓ AVAILABLE'}</td>
       <td style="color:#9591a0">${k.usedAt ? new Date(k.usedAt).toLocaleString() : '—'}</td>
       <td style="color:#9591a0">${k.usedByIP || '—'}</td>
     </tr>`).join('')}
   </table>
+  <script>
+  function verifyOrder(orderId) {
+    if (!confirm('Send redeem key to customer for order ' + orderId + '?')) return;
+    fetch('/api/verify-order?password=${ADMIN_PASSWORD}', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({orderId: orderId, password: '${ADMIN_PASSWORD}'})
+    }).then(r=>r.json()).then(d=>{
+      alert(d.message || (d.success ? 'Done!' : 'Error'));
+      if (d.success) location.reload();
+    }).catch(e=>alert('Error: '+e.message));
+  }
+  </script>
 </body>
 </html>`);
 });
