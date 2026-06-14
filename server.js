@@ -5,6 +5,7 @@ const cors     = require('cors');
 const fs       = require('fs');
 const path     = require('path');
 const crypto   = require('crypto');
+const multer   = require('multer');
 
 const app  = express();
 const PORT = process.env.PORT || 10000;
@@ -121,6 +122,62 @@ async function sendEmail({ to, subject, html, attachments = [] }) {
   if (!res.ok) throw new Error('Gmail API error: ' + JSON.stringify(data));
   return data;
 }
+
+
+/* ============================================================
+   MULTER — memory storage for screenshot upload
+   ============================================================ */
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 },
+});
+
+/* ============================================================
+   SUBMIT ORDER — customer places order, admin gets email
+   ============================================================ */
+app.post('/api/submit-order', upload.single('screenshot'), async (req, res) => {
+  const ip       = req.headers['x-forwarded-for'] || req.socket.remoteAddress || 'unknown';
+  const name     = (req.body.name     || '').trim();
+  const email    = (req.body.email    || '').trim();
+  const whatsapp = (req.body.whatsapp || '').trim();
+
+  if (!name || !email) return res.json({ success: false, message: 'Name and email are required.' });
+  if (!req.file)       return res.json({ success: false, message: 'Payment screenshot is required.' });
+
+  const orderId = 'FH6-' + Date.now() + '-' + crypto.randomBytes(3).toString('hex').toUpperCase();
+
+  try {
+    const screenshotExt = req.file.mimetype === 'image/png' ? 'png' : 'jpg';
+    await sendEmail({
+      to: ADMIN_EMAIL,
+      subject: `[NEW ORDER] ${orderId} — ${name}`,
+      html: `
+        <div style="font-family:monospace;background:#06060a;color:#eeeaf0;padding:24px;border-radius:8px;">
+          <h2 style="color:#e8c97a;letter-spacing:3px;margin-bottom:16px;">NEW FORZA ORDER RECEIVED</h2>
+          <table style="border-collapse:collapse;width:100%;">
+            <tr><td style="color:#9591a0;padding:6px 12px 6px 0;width:140px;">Order ID</td><td style="color:#4af0ff;font-weight:700;">${orderId}</td></tr>
+            <tr><td style="color:#9591a0;padding:6px 12px 6px 0;">Customer Name</td><td style="color:#eeeaf0;">${name}</td></tr>
+            <tr><td style="color:#9591a0;padding:6px 12px 6px 0;">Email</td><td style="color:#eeeaf0;">${email}</td></tr>
+            <tr><td style="color:#9591a0;padding:6px 12px 6px 0;">WhatsApp</td><td style="color:#eeeaf0;">${whatsapp || '—'}</td></tr>
+            <tr><td style="color:#9591a0;padding:6px 12px 6px 0;">Submitted At</td><td style="color:#eeeaf0;">${new Date().toLocaleString()}</td></tr>
+            <tr><td style="color:#9591a0;padding:6px 12px 6px 0;">IP Address</td><td style="color:#eeeaf0;">${ip}</td></tr>
+          </table>
+          <p style="margin-top:20px;color:#9591a0;">Payment screenshot attached. Send the customer a redeem key manually.</p>
+        </div>
+      `,
+      attachments: [{
+        filename: `payment_${orderId}.${screenshotExt}`,
+        content: req.file.buffer.toString('base64'),
+      }],
+    });
+
+    console.log(`[${new Date().toISOString()}] ORDER: ${orderId} from ${email}`);
+    return res.json({ success: true, message: 'Order received! Your redeem key will be emailed within 1-6 hours.' });
+  } catch(err) {
+    console.error('submit-order error:', err);
+    return res.json({ success: false, message: 'Server error. Please try again or contact support.' });
+  }
+});
 
 /* ============================================================
    HEALTH CHECK + KEEP-ALIVE PING
